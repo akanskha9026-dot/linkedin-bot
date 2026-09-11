@@ -1,0 +1,46 @@
+name: Daily embryology LinkedIn post
+
+on:
+  schedule:
+    # 13:00 UTC every day — adjust to your preferred posting time.
+    - cron: "0 13 * * *"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+permissions:
+  contents: write   # needed to commit the updated posted_log.json back
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily post script
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          LINKEDIN_ACCESS_TOKEN: ${{ secrets.LINKEDIN_ACCESS_TOKEN }}
+          LINKEDIN_PERSON_URN: ${{ secrets.LINKEDIN_PERSON_URN }}
+          PUBMED_CONTACT_EMAIL: ${{ secrets.PUBMED_CONTACT_EMAIL }}
+        run: python main.py
+
+      - name: Commit updated posted_log.json
+        run: |
+          git config user.name "embryology-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- posted_log.json; then
+            git add posted_log.json
+            git commit -m "Update posted_log.json [skip ci]"
+            git push
+          else
+            echo "No changes to posted_log.json (no post was made today)."
+          fi
