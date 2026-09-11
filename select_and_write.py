@@ -85,7 +85,7 @@ def _format_candidates(candidates: list) -> str:
     return "\n".join(lines)
 
 
-def select_candidate(candidates: list) -> dict | None:
+def select_candidate(candidates: list) :
     """Returns the chosen candidate dict (with 'reasoning' attached), or None."""
     if not candidates:
         return None
@@ -117,7 +117,7 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", text))
 
 
-def _contains_banned_phrase(text: str) -> str | None:
+def _contains_banned_phrase(text: str) :
     lowered = text.lower()
     for phrase in config.BANNED_PHRASES:
         if phrase in lowered:
