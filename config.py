@@ -26,7 +26,7 @@ LINKEDIN_REDIRECT_URI = os.environ.get("LINKEDIN_REDIRECT_URI", "http://localhos
 # ---------------------------------------------------------------------------
 # Groq's free-tier model lineup changes over time. Check https://console.groq.com/docs/models
 # and update this if the model below is retired.
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # ---------------------------------------------------------------------------

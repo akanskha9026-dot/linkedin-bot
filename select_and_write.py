@@ -78,7 +78,7 @@ marks around it, no explanation.
 def _format_candidates(candidates: list) -> str:
     lines = []
     for i, c in enumerate(candidates):
-        abstract = c["abstract"][:1200]  # keep prompt size sane
+        abstract = c["abstract"][:300]  # trimmed for free-tier TPM limits
         lines.append(
             f"[{i}] SOURCE: {c['source']}\nTITLE: {c['title']}\nABSTRACT: {abstract}\n"
         )
@@ -90,6 +90,7 @@ def select_candidate(candidates: list) :
     if not candidates:
         return None
 
+    candidates = candidates[:20]  # cap batch size to fit free-tier TPM limits
     prompt = _format_candidates(candidates)
     messages = [
         {"role": "system", "content": SELECT_SYSTEM_PROMPT},
