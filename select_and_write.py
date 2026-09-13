@@ -15,6 +15,7 @@ Both steps are logged so a human can audit *why* an article was chosen.
 
 import logging
 import re
+import time
 
 import config
 import groq_client
@@ -47,31 +48,34 @@ Respond ONLY with a JSON object, no other text:
 }
 """
 
-WRITE_SYSTEM_PROMPT = """You are a practicing expert embryologist who occasionally writes short \
-LinkedIn posts about developments in embryology, reproductive biology, and \
-reproductive/perinatal psychology. You are writing in your own professional \
-voice — not as a marketing account, not as an AI assistant.
+WRITE_SYSTEM_PROMPT = """You are a graduate student studying embryology and reproductive \
+biology (something like an MSc in Assisted Reproductive Technology). You occasionally \
+post on LinkedIn about studies you find genuinely interesting. You know the science \
+well, but you write like a real person sharing something with peers -- curious, \
+plain-spoken, occasionally informal -- not like a polished institutional account and \
+not like an AI assistant.
 
 Hard rules:
 - Base the post STRICTLY on the title and abstract provided. Do not invent, \
-extrapolate, or exaggerate findings. If the abstract is preliminary, in \
-vitro, animal-model, or small-sample, say so plainly rather than implying a \
-stronger or more clinical result than was shown.
-- Write in flowing paragraphs. No bullet points, no numbered lists, no \
-hashtags, no emoji.
-- Avoid AI-sounding stock phrases entirely, including but not limited to: \
-"exciting news", "let's dive into", "delve into", "furthermore", "in \
-today's world", "game changer", "unlock", generic closing questions like \
-"What do you think?", and overused em dashes used as a crutch.
-- It is fine, occasionally, to include a brief, genuine professional opinion \
-or reaction — but the post should stay grounded and substantive, not \
-promotional.
-- Do not add a call to action, a question to readers, or a hashtag block at \
-the end. End the post when the thought is finished.
-- Length: between {min_words} and {max_words} words.
+extrapolate, or exaggerate findings. If the abstract is preliminary, in vitro, \
+animal-model, or small-sample, say so plainly.
+- Write 4-5 flowing paragraphs. No bullet points, no numbered lists, no emoji, no \
+hashtags inside the body.
+- Avoid AI-sounding stock phrases: "exciting news", "let's dive into", "delve into", \
+"furthermore", "in today's world", "game changer", "unlock", overused em dashes used \
+as a crutch.
+- It's fine to include a genuine personal reaction or opinion as a student would.
+- End the body with one specific, genuine question inviting readers to share their \
+own view or experience related to THIS particular finding -- not a generic closer \
+like "What do you think?" or "Thoughts?".
+- Body length: between {min_words} and {max_words} words.
 
-Respond ONLY with the post text itself — no title, no preamble, no quotation \
-marks around it, no explanation.
+Respond ONLY with a JSON object, no other text:
+{{
+  "headline": "<a short, punchy, plain-sentence-case headline under 12 words, stating the core finding -- no hashtags, no emoji, no quotation marks>",
+  "body": "<the 4-5 paragraph post text as described above>",
+  "hashtags": ["<5-8 relevant hashtags including the # symbol, mixing 2-3 broad field tags like #Embryology or #ReproductiveBiology with more specific tags tied to this article's actual topic>"]
+}}
 """
 
 
@@ -96,7 +100,17 @@ def select_candidate(candidates: list) :
         {"role": "system", "content": SELECT_SYSTEM_PROMPT},
         {"role": "user", "content": f"Candidates:\n\n{prompt}\n\nChoose one."},
     ]
-    result = groq_client.chat_json(messages, temperature=0.2)
+    result = None
+    for attempt in range(1, 4):
+        try:
+            result = groq_client.chat_json(messages, temperature=0.2, max_tokens=700, reasoning_effort="low")
+            break
+        except groq_client.GroqError as exc:
+            log.warning("Selection attempt %d failed at the API level (%s); retrying.", attempt, exc)
+            time.sleep(6)
+    if result is None:
+        log.error("Selection failed after 3 attempts; skipping today.")
+        return None
 
     if not result.get("suitable") or result.get("selected_index") is None:
         log.info("No suitable candidate today. Reasoning: %s", result.get("reasoning"))
@@ -118,6 +132,28 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", text))
 
 
+_BOLD_UPPER_BASE = 0x1D5D4
+_BOLD_LOWER_BASE = 0x1D5EE
+_BOLD_DIGIT_BASE = 0x1D7EC
+
+
+def _to_bold_unicode(text: str) -> str:
+    """Converts plain text to Mathematical Sans-Serif Bold Unicode so it
+    renders as bold directly in a LinkedIn post (LinkedIn has no real
+    markdown/bold formatting for text posts)."""
+    out = []
+    for ch in text:
+        if "A" <= ch <= "Z":
+            out.append(chr(_BOLD_UPPER_BASE + (ord(ch) - ord("A"))))
+        elif "a" <= ch <= "z":
+            out.append(chr(_BOLD_LOWER_BASE + (ord(ch) - ord("a"))))
+        elif "0" <= ch <= "9":
+            out.append(chr(_BOLD_DIGIT_BASE + (ord(ch) - ord("0"))))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _contains_banned_phrase(text: str) :
     lowered = text.lower()
     for phrase in config.BANNED_PHRASES:
@@ -126,9 +162,9 @@ def _contains_banned_phrase(text: str) :
     return None
 
 
-def write_post(article: dict, max_attempts: int = 3) -> str:
-    """Writes the LinkedIn post text for the chosen article, retrying if the
-    draft breaks a hard rule (word count, banned phrasing)."""
+def write_post(article: dict, max_attempts: int = 6) -> str:
+    """Writes the LinkedIn post (bold headline + body + hashtags), retrying
+    if the draft breaks a hard rule (word count, banned phrasing)."""
     system_prompt = WRITE_SYSTEM_PROMPT.format(
         min_words=config.MIN_WORDS, max_words=config.MAX_WORDS
     )
@@ -139,7 +175,7 @@ def write_post(article: dict, max_attempts: int = 3) -> str:
         "Write the LinkedIn post now."
     )
 
-    last_draft = ""
+    last_body = ""
     for attempt in range(1, max_attempts + 1):
         messages = [
             {"role": "system", "content": system_prompt},
@@ -150,28 +186,42 @@ def write_post(article: dict, max_attempts: int = 3) -> str:
                 "role": "user",
                 "content": (
                     f"Your previous draft did not follow the rules "
-                    f"({last_draft[:60]}...). Rewrite it from scratch, "
+                    f"({last_body[:60]}...). Rewrite it from scratch, "
                     f"strictly following every rule, especially length "
-                    f"({config.MIN_WORDS}-{config.MAX_WORDS} words) and "
-                    f"avoiding stock AI phrasing."
+                    f"({config.MIN_WORDS}-{config.MAX_WORDS} words for the body) "
+                    f"and avoiding stock AI phrasing."
                 ),
             })
 
-        draft = groq_client.chat(messages, temperature=0.6).strip()
-        last_draft = draft
+        try:
+            result = groq_client.chat_json(messages, temperature=0.7, max_tokens=1500, reasoning_effort="low")
+        except groq_client.GroqError as exc:
+            log.warning("Draft attempt %d failed at the API level (%s); retrying.", attempt, exc)
+            last_body = ""
+            time.sleep(6)
+            continue
+        headline = str(result.get("headline", "")).strip()
+        body = str(result.get("body", "")).strip()
+        hashtags = result.get("hashtags", [])
+        if not isinstance(hashtags, list):
+            hashtags = []
+        hashtags = [h if str(h).startswith("#") else f"#{h}" for h in hashtags]
 
-        wc = _word_count(draft)
-        banned = _contains_banned_phrase(draft)
+        last_body = body
+        wc = _word_count(body)
+        banned = _contains_banned_phrase(body)
 
-        if config.MIN_WORDS <= wc <= config.MAX_WORDS and not banned:
-            return draft
+        if headline and body and config.MIN_WORDS <= wc <= config.MAX_WORDS and not banned:
+            bold_headline = _to_bold_unicode(headline)
+            hashtag_line = " ".join(hashtags[:config.HASHTAG_MAX])
+            return f"{bold_headline}\n\n{body}\n\n{hashtag_line}".strip()
 
         log.warning(
-            "Draft attempt %d rejected (word_count=%d, banned_phrase=%s)",
-            attempt, wc, banned,
+            "Draft attempt %d rejected (word_count=%d, banned_phrase=%s, has_headline=%s)",
+            attempt, wc, banned, bool(headline),
         )
 
     raise RuntimeError(
         f"Could not produce a valid post after {max_attempts} attempts. "
-        f"Last draft:\n{last_draft}"
+        f"Last body:\n{last_body}"
     )

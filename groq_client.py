@@ -14,7 +14,7 @@ class GroqError(RuntimeError):
     pass
 
 
-def chat(messages: list, temperature: float = 0.4, response_format_json: bool = False) -> str:
+def chat(messages: list, temperature: float = 0.4, response_format_json: bool = False, max_tokens: int = 1024, reasoning_effort: str = None) -> str:
     """Send a chat completion request to Groq and return the text content."""
     if not config.GROQ_API_KEY:
         raise GroqError("GROQ_API_KEY is not set. Add it as a GitHub Secret / env var.")
@@ -27,9 +27,12 @@ def chat(messages: list, temperature: float = 0.4, response_format_json: bool = 
         "model": config.GROQ_MODEL,
         "messages": messages,
         "temperature": temperature,
+        "max_tokens": max_tokens,
     }
     if response_format_json:
         body["response_format"] = {"type": "json_object"}
+    if reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
 
     resp = requests.post(config.GROQ_API_URL, headers=headers, json=body, timeout=60)
 
@@ -43,9 +46,9 @@ def chat(messages: list, temperature: float = 0.4, response_format_json: bool = 
         raise GroqError(f"Unexpected Groq response shape: {data}") from exc
 
 
-def chat_json(messages: list, temperature: float = 0.3) -> dict:
+def chat_json(messages: list, temperature: float = 0.3, max_tokens: int = 1024, reasoning_effort: str = None) -> dict:
     """Like chat(), but parses the response as JSON, stripping code fences if present."""
-    raw = chat(messages, temperature=temperature, response_format_json=True)
+    raw = chat(messages, temperature=temperature, response_format_json=True, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`")

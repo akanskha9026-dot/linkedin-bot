@@ -79,8 +79,11 @@ RSS_FEEDS = [
 # ---------------------------------------------------------------------------
 # Content / style rules enforced in the writing prompt and post-checks
 # ---------------------------------------------------------------------------
-MIN_WORDS = 120
-MAX_WORDS = 220
+MIN_WORDS = 300
+MAX_WORDS = 350
+
+HASHTAG_MIN = 5
+HASHTAG_MAX = 8
 
 BANNED_PHRASES = [
     "exciting news",
@@ -93,11 +96,6 @@ BANNED_PHRASES = [
     "game-changer",
     "unlock the",
     "delve into",
-    "what do you think",
-    "thoughts?",
-    "thoughts on this",
-    "i'd love to hear",
-    "drop a comment",
     "stay tuned",
 ]
 
