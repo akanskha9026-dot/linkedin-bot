@@ -65,9 +65,11 @@ hashtags inside the body.
 "furthermore", "in today's world", "game changer", "unlock", overused em dashes used \
 as a crutch.
 - It's fine to include a genuine personal reaction or opinion as a student would.
-- End the body with one specific, genuine question inviting readers to share their \
-own view or experience related to THIS particular finding -- not a generic closer \
-like "What do you think?" or "Thoughts?".
+- End the body with a sentence that explicitly frames the closing line as a \
+question to readers, using a lead-in phrase such as "I would like to ask our \
+readers," "I'd be curious to hear from readers," or similar -- followed by one \
+specific, genuine question tied to THIS particular finding (not a generic closer \
+like "What do you think?" or "Thoughts?").
 - Body length: between {min_words} and {max_words} words.
 
 Respond ONLY with a JSON object, no other text:
