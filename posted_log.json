@@ -1,4 +1,17 @@
 {
-  "posted_ids": [],
-  "posts": []
+  "posted_ids": [
+    "pmid:42745869"
+  ],
+  "posts": [
+    {
+      "id": "pmid:42745869",
+      "source": "PubMed",
+      "title": "Clinical evaluation and predictive model development of AI-based non-invasive embryo selection in in vitro fertilization patients.",
+      "url": "https://pubmed.ncbi.nlm.nih.gov/42745869/",
+      "posted_at": "2026-09-16T16:00:17.834876+00:00",
+      "linkedin_post_id": "urn:li:share:7506019137920475136",
+      "selection_reasoning": "The AI‑based embryo selection study presents a concrete clinical evaluation and a predictive model with measurable outcomes, offering clear, actionable data for reproductive medicine professionals. It meets the criteria for real scientific substance and relevance to IVF practice.",
+      "post_text": "𝗔𝗜‑𝗯𝗮𝘀𝗲𝗱 𝗲𝗺𝗯𝗿𝘆𝗼 𝘀𝗰𝗼𝗿𝗶𝗻𝗴 𝗼𝘂𝘁𝗽𝗲𝗿𝗳𝗼𝗿𝗺𝘀 𝘁𝗿𝗮𝗱𝗶𝘁𝗶𝗼𝗻𝗮𝗹 𝗴𝗿𝗮𝗱𝗶𝗻𝗴\n\nEmbryo selection is still one of the biggest hurdles in IVF, and we all know how subjective visual grading can be. A recent retrospective cohort from a tertiary fertility center looked at 300 cycles and 742 embryos, applying an AI‑driven non‑invasive scoring system that analyzes morphokinetic data. The results are striking: clinical pregnancy rates climbed from 18.5 % for low AI scores (<55) to 74 % for high scores (≥85), a difference that was statistically significant (p < 0.001).\n\nThe study didn’t just stop at raw numbers. They built a multivariable logistic regression model and found that, aside from the usual suspects like maternal age and AMH, an AI score ≥85 was the strongest independent predictor of clinical pregnancy (AOR = 3.67). The machine‑learning model itself had an AUC‑ROC of 0.89, accuracy over 84 %, and good sensitivity and specificity. In plain terms, the AI system was better at picking embryos that actually implanted and led to live births than the conventional grading that we all use.\n\nIt’s worth noting that this was a retrospective analysis, so we’re looking at real‑world data rather than a tightly controlled experiment. Still, the sample size is decent, and the performance metrics are encouraging for a technology that’s still in the early stages of clinical adoption. The authors argue that integrating AI into routine practice could help us move toward more personalized care, tailoring embryo transfer decisions to each patient’s profile.\n\nFrom a student perspective, the idea that a computer can parse subtle timing cues that we might miss is fascinating. It raises questions about how we train the next generation of embryologists and whether we’ll eventually rely more on data than on eye‑inspection.\n\nI would like to ask our readers: how do you think AI‑based embryo scoring will change the workflow in your clinic, and what safeguards would you want in place before fully trusting a machine’s recommendation?\n\n#Embryology #ReproductiveBiology #IVF #AIFertility #EmbryoSelection"
+    }
+  ]
 }
