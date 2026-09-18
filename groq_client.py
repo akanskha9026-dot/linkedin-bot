@@ -47,7 +47,10 @@ def chat(messages: list, temperature: float = 0.4, response_format_json: bool = 
 
 
 def chat_json(messages: list, temperature: float = 0.3, max_tokens: int = 1024, reasoning_effort: str = None) -> dict:
-    """Like chat(), but parses the response as JSON, stripping code fences if present."""
+    """Like chat(), but parses the response as JSON, stripping code fences if present.
+    Always returns a dict — normalizes the case where the model wraps the
+    object in a list, and raises GroqError (so callers' existing retry loops
+    catch it) for any shape that still isn't a usable dict."""
     raw = chat(messages, temperature=temperature, response_format_json=True, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
     cleaned = raw.strip()
     if cleaned.startswith("```"):
@@ -56,6 +59,14 @@ def chat_json(messages: list, temperature: float = 0.3, max_tokens: int = 1024, 
             cleaned = cleaned[4:]
     cleaned = cleaned.strip()
     try:
-        return json.loads(cleaned)
+        data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise GroqError(f"Could not parse JSON from Groq response: {raw[:500]}") from exc
+
+    if isinstance(data, list):
+        data = next((item for item in data if isinstance(item, dict)), None)
+
+    if not isinstance(data, dict):
+        raise GroqError(f"Groq response was not a JSON object (got {type(data).__name__}): {raw[:500]}")
+
+    return data
