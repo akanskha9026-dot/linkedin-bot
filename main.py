@@ -10,9 +10,12 @@ Flow:
   5. Update posted_log.json with the new entry
 
 Exit codes:
-  0  — posted successfully, or a "nothing suitable today" no-op (not a failure)
-  1  — a real failure (auth, API error, etc.) — GitHub Actions will mark the
-       run as failed so you get notified
+  0  — posted successfully, a "nothing suitable today" no-op, or an
+       unexpected AI-pipeline error (fetch/select/write) that doesn't need
+       same-day attention — logged clearly, but treated as "skip today"
+  1  — a real failure (LinkedIn auth, LinkedIn API error) — GitHub Actions
+       will mark the run as failed so you get notified, because this is
+       the one case that actually needs you to act (e.g. re-run OAuth)
 """
 
 import json
@@ -48,17 +51,27 @@ def save_log(log_data: dict) -> None:
 def run() -> int:
     log.info("=== Daily embryology/reproductive-biology post run started ===")
 
-    candidates = fetch_sources.get_candidates()
-    if not candidates:
-        log.info("No fresh candidates found today (all sources exhausted or empty). Exiting cleanly.")
+    # --- AI pipeline: fetch, select, write -----------------------------
+    # Wrapped so that an unexpected bug or a bad LLM day just skips today's
+    # post (green run, clear log) instead of paging you with a red X.
+    # LinkedIn posting itself is handled separately below and DOES fail
+    # loudly, since that's the one thing that actually needs your action.
+    try:
+        candidates = fetch_sources.get_candidates()
+        if not candidates:
+            log.info("No fresh candidates found today (all sources exhausted or empty). Exiting cleanly.")
+            return 0
+
+        chosen = select_and_write.select_candidate(candidates)
+        if chosen is None:
+            log.info("AI selection found nothing suitable today. Exiting cleanly (no post made).")
+            return 0
+
+        post_text = select_and_write.write_post(chosen)
+    except Exception as exc:  # noqa: BLE001
+        log.error("AI pipeline (fetch/select/write) failed unexpectedly; skipping today's post: %s", exc, exc_info=True)
         return 0
 
-    chosen = select_and_write.select_candidate(candidates)
-    if chosen is None:
-        log.info("AI selection found nothing suitable today. Exiting cleanly (no post made).")
-        return 0
-
-    post_text = select_and_write.write_post(chosen)
     word_count = len(post_text.split())
     log.info("Draft ready (%d words):\n%s", word_count, post_text)
 
@@ -66,6 +79,7 @@ def run() -> int:
         log.info("--dry-run flag set: skipping the actual LinkedIn post and log write.")
         return 0
 
+    # --- LinkedIn posting: real failures still show red -----------------
     try:
         result = post_linkedin.post_text_update(post_text)
     except post_linkedin.LinkedInAuthError as exc:
