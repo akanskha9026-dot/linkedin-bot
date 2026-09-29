@@ -14,6 +14,7 @@ Two-step AI pipeline:
 Both steps are logged so a human can audit why a story was chosen.
 """
 
+import json
 import logging
 import re
 import time
@@ -28,6 +29,10 @@ log = logging.getLogger("select_and_write")
 MIN_WORDS = 200
 MAX_WORDS = 250
 TARGET_WORDS = 225
+
+# Groq's free tier has a tokens-per-minute cap, so pause between attempts.
+PAUSE_AFTER_REJECTED_DRAFT = 8
+PAUSE_AFTER_API_ERROR = 15
 
 SELECT_SYSTEM_PROMPT = """You are the editorial filter for a LinkedIn account run by an \
 embryology student who explains and discusses recent news in assisted reproductive \
@@ -92,7 +97,8 @@ Cover what happened, the science behind it, why it matters, and your own reactio
 student. Do NOT use headings, labels or bold text inside the paragraphs.
 - Then a closing question: one sentence that invites readers to share their views, \
 using a lead-in such as "I'd love to hear your views:" followed by ONE specific \
-question tied to THIS story. Never a generic closer like "What do you think?".
+question tied to THIS story. Never a generic closer like "What do you think?". Put it \
+ONLY in the closing_question field, not inside the paragraphs.
 - No bullet points, no numbered lists, no emoji, no hashtags inside the text.
 - Avoid AI-sounding phrases: "exciting news", "let's dive into", "delve into", \
 "furthermore", "in today's world", "game changer", "unlock", and em dashes used as a \
@@ -100,7 +106,7 @@ crutch.
 - LENGTH: the headline + all paragraphs + the closing question must total between \
 __MIN__ and __MAX__ words. Aim for about __TARGET__ words.
 
-Respond ONLY with a JSON object, no other text:
+Respond ONLY with a JSON object using EXACTLY these keys, no other text:
 {
   "headline": "<short, punchy, plain-sentence-case headline under 12 words stating the core news - no hashtags, no emoji, no quotation marks>",
   "paragraphs": ["<paragraph 1>", "<paragraph 2>", "<paragraph 3>"],
@@ -139,7 +145,7 @@ def select_candidate(candidates: list):
             break
         except groq_client.GroqError as exc:
             log.warning("Selection attempt %d failed at the API level (%s); retrying.", attempt, exc)
-            time.sleep(6)
+            time.sleep(PAUSE_AFTER_API_ERROR)
     if result is None:
         log.error("Selection failed after 3 attempts; skipping today.")
         return None
@@ -198,33 +204,55 @@ def _contains_banned_phrase(text: str):
     return None
 
 
-def _parse_draft(result: dict):
-    """Validate the model's JSON. Returns (headline, paragraphs, closing,
-    hashtags) or None if any required piece is missing or malformed."""
-    headline = str(result.get("headline", "")).strip()
-    closing = str(result.get("closing_question", "")).strip()
-    raw_paragraphs = result.get("paragraphs")
+def _parse_draft(result):
+    """Validate the model's JSON.
 
-    # Tolerate the paragraphs arriving as one block of text.
-    if isinstance(raw_paragraphs, str):
-        raw_paragraphs = [p for p in re.split(r"\n\s*\n", raw_paragraphs) if p.strip()]
+    Returns ((headline, paragraphs, closing, hashtags), None) on success, or
+    (None, reason) where reason says exactly what was wrong. Accepts a few
+    alternate key names and reply shapes so a small formatting slip does not
+    throw away a good draft.
+    """
+    if not isinstance(result, dict):
+        return None, f"reply was not a JSON object (got {type(result).__name__})"
 
-    if not headline or not closing or not isinstance(raw_paragraphs, list):
-        return None
+    keys = sorted(str(k) for k in result.keys())
+
+    headline = str(result.get("headline") or result.get("title") or "").strip()
+    closing = str(
+        result.get("closing_question") or result.get("closing") or result.get("question") or ""
+    ).strip()
+
+    raw = result.get("paragraphs")
+    if raw is None:
+        raw = result.get("body") or result.get("text") or result.get("post")
+    if isinstance(raw, str):
+        raw = [p for p in re.split(r"\n\s*\n", raw) if p.strip()]
+
+    if not headline:
+        return None, f"missing headline (keys seen: {keys})"
+    if not isinstance(raw, list) or not raw:
+        return None, f"missing paragraphs (keys seen: {keys})"
 
     paragraphs = []
-    for p in raw_paragraphs:
+    for p in raw:
         if isinstance(p, dict):  # tolerate {"text": "..."} shapes
             p = p.get("text", "")
         text = str(p).strip()
-        if not text:
-            return None
-        paragraphs.append(text)
+        if text:
+            paragraphs.append(text)
 
-    if not 3 <= len(paragraphs) <= 4:
-        return None
+    # If the model put the closing question at the end of the paragraphs, use it.
+    if not closing and paragraphs and "?" in paragraphs[-1]:
+        closing = paragraphs.pop()
+
+    if not closing:
+        return None, f"missing closing_question (keys seen: {keys})"
+    if not 2 <= len(paragraphs) <= 6:
+        return None, f"{len(paragraphs)} paragraphs (need 3 or 4)"
 
     raw_tags = result.get("hashtags", [])
+    if isinstance(raw_tags, str):
+        raw_tags = re.findall(r"#?\w+", raw_tags)
     if not isinstance(raw_tags, list):
         raw_tags = []
     hashtags = []
@@ -232,8 +260,10 @@ def _parse_draft(result: dict):
         tag = re.sub(r"\W", "", str(h).lstrip("#"))
         if tag and f"#{tag}" not in hashtags:
             hashtags.append(f"#{tag}")
+    if len(hashtags) < 3:
+        return None, f"only {len(hashtags)} hashtags (need 5-8)"
 
-    return headline, paragraphs, closing, hashtags
+    return (headline, paragraphs, closing, hashtags), None
 
 
 def _draft_word_count(headline: str, paragraphs: list, closing: str) -> int:
@@ -280,21 +310,26 @@ def write_post(article: dict, max_attempts: int = 6) -> str:
             messages.append({"role": "user", "content": feedback})
 
         try:
-            result = groq_client.chat_json(messages, temperature=0.7, max_tokens=1800, reasoning_effort="low")
+            result = groq_client.chat_json(messages, temperature=0.7, max_tokens=1400, reasoning_effort="low")
         except groq_client.GroqError as exc:
             log.warning("Draft attempt %d failed at the API level (%s); retrying.", attempt, exc)
             feedback = ""
-            time.sleep(6)
+            time.sleep(PAUSE_AFTER_API_ERROR)
             continue
 
-        parsed = _parse_draft(result)
+        parsed, reason = _parse_draft(result)
         if parsed is None:
-            log.warning("Draft attempt %d rejected (missing or malformed fields).", attempt)
+            log.warning("Draft attempt %d rejected: %s", attempt, reason)
+            try:
+                last_draft_text = json.dumps(result, ensure_ascii=False)[:1500]
+            except (TypeError, ValueError):
+                last_draft_text = str(result)[:1500]
             feedback = (
-                "Your last reply was missing required fields or had the wrong shape. "
-                "Return the JSON exactly as specified: headline, 3 or 4 paragraphs "
-                "(a list of plain strings), closing_question, hashtags."
+                f"Your last reply was rejected: {reason}. Return the JSON exactly as "
+                "specified with the keys headline, paragraphs (a list of 3 or 4 plain "
+                "strings), closing_question, hashtags (5-8 items)."
             )
+            time.sleep(PAUSE_AFTER_REJECTED_DRAFT)
             continue
 
         headline, paragraphs, closing, hashtags = parsed
@@ -324,6 +359,7 @@ def write_post(article: dict, max_attempts: int = 6) -> str:
             "Rewrite the whole post following every rule. The word total counts the headline, "
             "all paragraphs and the closing question."
         )
+        time.sleep(PAUSE_AFTER_REJECTED_DRAFT)
 
     raise RuntimeError(
         f"Could not produce a valid post after {max_attempts} attempts. "
