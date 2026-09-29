@@ -76,6 +76,14 @@ the headline says. If a finding is preliminary, small, in vitro or animal-based,
 or number that is not written in the TITLE or SUMMARY. Do NOT state which freezing, \
 culture or lab method was used in the story unless the text names it. When the story is \
 thin, say what is known and discuss the general science and the open questions instead.
+- Do NOT state success rates, statistics, trends, what "studies show", or how common \
+something is, unless the TITLE or SUMMARY says it. Do NOT say which technique, method or \
+protocol was used in the story (for example vitrification versus slow freezing) unless \
+the text names it. Stay with what is known and what is still unknown.
+- Voice: write like a curious student, not a report. Use first person ("I", "my"), vary \
+sentence length, and raise one or two specific questions you would ask a senior \
+embryologist about this story. Avoid stock lines like "raises questions", "highlights the \
+robustness of" and "frameworks must adapt".
 - You may explain well-established background science (for example what a blastocyst \
 is, or what preimplantation genetic testing does) to help readers understand the \
 story. Keep that clearly as background, never as a claim about the story.
@@ -196,6 +204,10 @@ def _parse_draft(result: dict):
     headline = str(result.get("headline", "")).strip()
     closing = str(result.get("closing_question", "")).strip()
     raw_paragraphs = result.get("paragraphs")
+
+    # Tolerate the paragraphs arriving as one block of text.
+    if isinstance(raw_paragraphs, str):
+        raw_paragraphs = [p for p in re.split(r"\n\s*\n", raw_paragraphs) if p.strip()]
 
     if not headline or not closing or not isinstance(raw_paragraphs, list):
         return None
