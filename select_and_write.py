@@ -7,9 +7,9 @@ Two-step AI pipeline:
      tangled up in an active legal/political controversy.
 
   2. WRITE - write the LinkedIn post as an embryology student explaining and
-     discussing that story: bold headline, 3-4 short sections with bold
-     headings, a closing question inviting readers' views, source line and
-     hashtags. Total length 200-250 words (excluding source line + hashtags).
+     discussing that story: bold headline, 3-4 plain paragraphs, a closing
+     question inviting readers' views, then hashtags. Total visible length
+     200-250 words (hashtags excluded).
 
 Both steps are logged so a human can audit why a story was chosen.
 """
@@ -23,8 +23,8 @@ import groq_client
 
 log = logging.getLogger("select_and_write")
 
-# Length limits for the visible post text: headline + section headings +
-# section paragraphs + closing question (source line and hashtags excluded).
+# Length limits for the visible post text: headline + paragraphs + closing
+# question (hashtags excluded).
 MIN_WORDS = 200
 MAX_WORDS = 250
 TARGET_WORDS = 225
@@ -72,13 +72,16 @@ Hard rules:
 story (numbers, names, dates, places, quotes, results) must come from that text. Do \
 not invent or exaggerate. If the summary only repeats the headline, you know only what \
 the headline says. If a finding is preliminary, small, in vitro or animal-based, say so.
+- Do NOT add any location, country, clinic, doctor, date, outcome (such as "healthy") \
+or number that is not written in the TITLE or SUMMARY. Do NOT state which freezing, \
+culture or lab method was used in the story unless the text names it. When the story is \
+thin, say what is known and discuss the general science and the open questions instead.
 - You may explain well-established background science (for example what a blastocyst \
 is, or what preimplantation genetic testing does) to help readers understand the \
 story. Keep that clearly as background, never as a claim about the story.
-- Structure: 3 or 4 sections. Each section has a short heading (2-4 words, sentence \
-case, for example "What happened", "The science behind it", "Why it matters", \
-"My take") and one short paragraph of 2-4 sentences.
-- Include a personal reaction or opinion as a student, in one of the sections.
+- Structure: 3 or 4 short paragraphs of 2-4 sentences each, written as flowing prose. \
+Cover what happened, the science behind it, why it matters, and your own reaction as a \
+student. Do NOT use headings, labels or bold text inside the paragraphs.
 - Then a closing question: one sentence that invites readers to share their views, \
 using a lead-in such as "I'd love to hear your views:" followed by ONE specific \
 question tied to THIS story. Never a generic closer like "What do you think?".
@@ -86,15 +89,13 @@ question tied to THIS story. Never a generic closer like "What do you think?".
 - Avoid AI-sounding phrases: "exciting news", "let's dive into", "delve into", \
 "furthermore", "in today's world", "game changer", "unlock", and em dashes used as a \
 crutch.
-- LENGTH: the headline + all section headings + all section paragraphs + the closing \
-question must total between __MIN__ and __MAX__ words. Aim for about __TARGET__ words.
+- LENGTH: the headline + all paragraphs + the closing question must total between \
+__MIN__ and __MAX__ words. Aim for about __TARGET__ words.
 
 Respond ONLY with a JSON object, no other text:
 {
   "headline": "<short, punchy, plain-sentence-case headline under 12 words stating the core news - no hashtags, no emoji, no quotation marks>",
-  "sections": [
-    {"heading": "<2-4 word heading>", "text": "<one short paragraph>"}
-  ],
+  "paragraphs": ["<paragraph 1>", "<paragraph 2>", "<paragraph 3>"],
   "closing_question": "<one sentence: lead-in plus one specific question>",
   "hashtags": ["<5-8 hashtags including the # symbol: 2-3 broad tags like #IVF or #Embryology plus more specific tags tied to this story>"]
 }
@@ -190,26 +191,25 @@ def _contains_banned_phrase(text: str):
 
 
 def _parse_draft(result: dict):
-    """Validate the model's JSON. Returns (headline, sections, closing, hashtags)
-    or None if any required piece is missing or malformed."""
+    """Validate the model's JSON. Returns (headline, paragraphs, closing,
+    hashtags) or None if any required piece is missing or malformed."""
     headline = str(result.get("headline", "")).strip()
     closing = str(result.get("closing_question", "")).strip()
-    raw_sections = result.get("sections")
+    raw_paragraphs = result.get("paragraphs")
 
-    if not headline or not closing or not isinstance(raw_sections, list):
+    if not headline or not closing or not isinstance(raw_paragraphs, list):
         return None
 
-    sections = []
-    for s in raw_sections:
-        if not isinstance(s, dict):
+    paragraphs = []
+    for p in raw_paragraphs:
+        if isinstance(p, dict):  # tolerate {"text": "..."} shapes
+            p = p.get("text", "")
+        text = str(p).strip()
+        if not text:
             return None
-        heading = str(s.get("heading", "")).strip()
-        text = str(s.get("text", "")).strip()
-        if not heading or not text:
-            return None
-        sections.append((heading, text))
+        paragraphs.append(text)
 
-    if not 3 <= len(sections) <= 4:
+    if not 3 <= len(paragraphs) <= 4:
         return None
 
     raw_tags = result.get("hashtags", [])
@@ -221,22 +221,17 @@ def _parse_draft(result: dict):
         if tag and f"#{tag}" not in hashtags:
             hashtags.append(f"#{tag}")
 
-    return headline, sections, closing, hashtags
+    return headline, paragraphs, closing, hashtags
 
 
-def _draft_word_count(headline: str, sections: list, closing: str) -> int:
-    total = _word_count(headline) + _word_count(closing)
-    for heading, text in sections:
-        total += _word_count(heading) + _word_count(text)
-    return total
+def _draft_word_count(headline: str, paragraphs: list, closing: str) -> int:
+    return _word_count(headline) + _word_count(closing) + sum(_word_count(p) for p in paragraphs)
 
 
-def _assemble_post(article: dict, headline: str, sections: list, closing: str, hashtags: list) -> str:
+def _assemble_post(headline: str, paragraphs: list, closing: str, hashtags: list) -> str:
     parts = [_to_bold_unicode(headline)]
-    for heading, text in sections:
-        parts.append(f"{_to_bold_unicode(heading)}\n{text}")
+    parts.extend(paragraphs)
     parts.append(closing)
-    parts.append(f"Source: {article['source']}")
     hashtag_max = getattr(config, "HASHTAG_MAX", 8)
     if hashtags:
         parts.append(" ".join(hashtags[:hashtag_max]))
@@ -244,9 +239,9 @@ def _assemble_post(article: dict, headline: str, sections: list, closing: str, h
 
 
 def write_post(article: dict, max_attempts: int = 6) -> str:
-    """Writes the LinkedIn post (bold headline, headed sections, closing
-    question, source line, hashtags), retrying if a draft breaks a hard rule
-    (word count, banned phrasing, missing pieces)."""
+    """Writes the LinkedIn post (bold headline, plain paragraphs, closing
+    question, hashtags), retrying if a draft breaks a hard rule (word count,
+    banned phrasing, missing pieces)."""
     system_prompt = (
         WRITE_SYSTEM_PROMPT
         .replace("__MIN__", str(MIN_WORDS))
@@ -285,20 +280,20 @@ def write_post(article: dict, max_attempts: int = 6) -> str:
             log.warning("Draft attempt %d rejected (missing or malformed fields).", attempt)
             feedback = (
                 "Your last reply was missing required fields or had the wrong shape. "
-                "Return the JSON exactly as specified: headline, 3 or 4 sections "
-                "(each with heading and text), closing_question, hashtags."
+                "Return the JSON exactly as specified: headline, 3 or 4 paragraphs "
+                "(a list of plain strings), closing_question, hashtags."
             )
             continue
 
-        headline, sections, closing, hashtags = parsed
-        wc = _draft_word_count(headline, sections, closing)
-        full_text = " ".join([headline, closing] + [f"{h} {t}" for h, t in sections])
+        headline, paragraphs, closing, hashtags = parsed
+        wc = _draft_word_count(headline, paragraphs, closing)
+        full_text = " ".join([headline] + paragraphs + [closing])
         last_draft_text = full_text
         banned = _contains_banned_phrase(full_text)
 
         if MIN_WORDS <= wc <= MAX_WORDS and not banned:
             log.info("Draft accepted on attempt %d (%d words).", attempt, wc)
-            return _assemble_post(article, headline, sections, closing, hashtags)
+            return _assemble_post(headline, paragraphs, closing, hashtags)
 
         log.warning("Draft attempt %d rejected (word_count=%d, banned_phrase=%s)", attempt, wc, banned)
         problems = []
@@ -315,7 +310,7 @@ def write_post(article: dict, max_attempts: int = 6) -> str:
         feedback = (
             "Your previous draft was rejected: " + "; ".join(problems) + ". "
             "Rewrite the whole post following every rule. The word total counts the headline, "
-            "all headings, all paragraphs and the closing question."
+            "all paragraphs and the closing question."
         )
 
     raise RuntimeError(
