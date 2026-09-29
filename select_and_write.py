@@ -11,13 +11,16 @@ Two-step AI pipeline:
      question inviting readers' views, then hashtags. Total visible length
      200-250 words (hashtags excluded).
 
-Both steps are logged so a human can audit why a story was chosen.
+The WRITE step asks the model for PLAIN TEXT with simple labels instead of
+JSON (small models mangle nested JSON) and parses it here.
 """
 
-import json
 import logging
+import os
 import re
 import time
+
+import requests
 
 import config
 import groq_client
@@ -31,8 +34,10 @@ MAX_WORDS = 250
 TARGET_WORDS = 225
 
 # Groq's free tier has a tokens-per-minute cap, so pause between attempts.
-PAUSE_AFTER_REJECTED_DRAFT = 8
+PAUSE_AFTER_REJECTED_DRAFT = 10
 PAUSE_AFTER_API_ERROR = 15
+
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 SELECT_SYSTEM_PROMPT = """You are the editorial filter for a LinkedIn account run by an \
 embryology student who explains and discusses recent news in assisted reproductive \
@@ -92,27 +97,32 @@ robustness of" and "frameworks must adapt".
 - You may explain well-established background science (for example what a blastocyst \
 is, or what preimplantation genetic testing does) to help readers understand the \
 story. Keep that clearly as background, never as a claim about the story.
-- Structure: 3 or 4 short paragraphs of 2-4 sentences each, written as flowing prose. \
-Cover what happened, the science behind it, why it matters, and your own reaction as a \
-student. Do NOT use headings, labels or bold text inside the paragraphs.
-- Then a closing question: one sentence that invites readers to share their views, \
-using a lead-in such as "I'd love to hear your views:" followed by ONE specific \
-question tied to THIS story. Never a generic closer like "What do you think?". Put it \
-ONLY in the closing_question field, not inside the paragraphs.
-- No bullet points, no numbered lists, no emoji, no hashtags inside the text.
+- Structure: exactly 3 short paragraphs of 2-4 sentences each, written as flowing \
+prose, with a BLANK LINE between paragraphs. Cover what happened, the science behind \
+it, and your own reaction as a student. No headings, labels or bold text inside the \
+paragraphs.
+- The closing question is separate: one sentence that invites readers to share their \
+views, using a lead-in such as "I'd love to hear your views:" followed by ONE specific \
+question tied to THIS story. Never a generic closer like "What do you think?".
+- No bullet points, no numbered lists, no emoji, no hashtags inside the paragraphs, no \
+markdown or asterisks anywhere.
 - Avoid AI-sounding phrases: "exciting news", "let's dive into", "delve into", \
 "furthermore", "in today's world", "game changer", "unlock", and em dashes used as a \
 crutch.
 - LENGTH: the headline + all paragraphs + the closing question must total between \
 __MIN__ and __MAX__ words. Aim for about __TARGET__ words.
 
-Respond ONLY with a JSON object using EXACTLY these keys, no other text:
-{
-  "headline": "<short, punchy, plain-sentence-case headline under 12 words stating the core news - no hashtags, no emoji, no quotation marks>",
-  "paragraphs": ["<paragraph 1>", "<paragraph 2>", "<paragraph 3>"],
-  "closing_question": "<one sentence: lead-in plus one specific question>",
-  "hashtags": ["<5-8 hashtags including the # symbol: 2-3 broad tags like #IVF or #Embryology plus more specific tags tied to this story>"]
-}
+Reply in PLAIN TEXT using EXACTLY this layout (no JSON, no code fences):
+
+HEADLINE: <short, punchy, plain-sentence-case headline under 12 words stating the core news - no hashtags, no emoji, no quotation marks>
+BODY:
+<paragraph 1>
+
+<paragraph 2>
+
+<paragraph 3>
+QUESTION: <one sentence: lead-in plus one specific question>
+HASHTAGS: <5-8 hashtags separated by spaces: 2-3 broad tags like #IVF #Embryology plus more specific tags tied to this story>
 """
 
 
@@ -204,62 +214,102 @@ def _contains_banned_phrase(text: str):
     return None
 
 
-def _parse_draft(result):
-    """Validate the model's JSON.
+def _groq_text(messages: list, temperature: float = 0.7, max_tokens: int = 1100):
+    """Plain-text chat call to Groq. Returns (text, error, wait_seconds)."""
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        return "", "GROQ_API_KEY is not set", PAUSE_AFTER_API_ERROR
+
+    payload = {
+        "model": getattr(config, "GROQ_MODEL", "openai/gpt-oss-20b"),
+        "messages": messages,
+        "temperature": temperature,
+        "max_completion_tokens": max_tokens,
+        "reasoning_effort": "low",
+    }
+    try:
+        resp = requests.post(
+            GROQ_CHAT_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=90,
+        )
+    except requests.RequestException as exc:
+        return "", f"network error: {exc}", PAUSE_AFTER_API_ERROR
+
+    if resp.status_code != 200:
+        wait = PAUSE_AFTER_API_ERROR
+        m = re.search(r"try again in ([0-9.]+)s", resp.text)
+        if m:
+            wait = float(m.group(1)) + 2
+        return "", f"Groq API error {resp.status_code}: {resp.text[:160]}", wait
+
+    try:
+        content = resp.json()["choices"][0]["message"].get("content") or ""
+    except (KeyError, IndexError, ValueError):
+        return "", "unexpected Groq response shape", PAUSE_AFTER_API_ERROR
+    return content.strip(), None, 0
+
+
+def _regroup_sentences(text: str, groups: int = 3):
+    """Split one big block of text into `groups` paragraphs by sentences."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if len(sentences) < groups * 2:
+        return None
+    size = len(sentences) / groups
+    out = []
+    for g in range(groups):
+        chunk = " ".join(sentences[round(g * size):round((g + 1) * size)]).strip()
+        if chunk:
+            out.append(chunk)
+    return out
+
+
+def _parse_plain_draft(text: str):
+    """Parse the plain-text layout.
 
     Returns ((headline, paragraphs, closing, hashtags), None) on success, or
-    (None, reason) where reason says exactly what was wrong. Accepts a few
-    alternate key names and reply shapes so a small formatting slip does not
-    throw away a good draft.
+    (None, reason) saying exactly what was wrong.
     """
-    if not isinstance(result, dict):
-        return None, f"reply was not a JSON object (got {type(result).__name__})"
+    if not text:
+        return None, "empty reply (the model may have run out of tokens)"
 
-    keys = sorted(str(k) for k in result.keys())
+    text = text.replace("\r\n", "\n").replace("**", "").replace("```", "")
 
-    headline = str(result.get("headline") or result.get("title") or "").strip()
-    closing = str(
-        result.get("closing_question") or result.get("closing") or result.get("question") or ""
-    ).strip()
+    h_m = re.search(r"HEADLINE:\s*(.+)", text, re.I)
+    b_m = re.search(r"BODY:\s*(.*?)\n\s*QUESTION:", text, re.I | re.S)
+    q_m = re.search(r"QUESTION:\s*(.*?)\s*(?:\n\s*HASHTAGS:|$)", text, re.I | re.S)
+    t_m = re.search(r"HASHTAGS:\s*(.+)", text, re.I | re.S)
 
-    raw = result.get("paragraphs")
-    if raw is None:
-        raw = result.get("body") or result.get("text") or result.get("post")
-    if isinstance(raw, str):
-        raw = [p for p in re.split(r"\n\s*\n", raw) if p.strip()]
+    if not h_m:
+        return None, "missing HEADLINE: line"
+    if not b_m:
+        return None, "missing BODY: section (or QUESTION: label after it)"
+    if not q_m:
+        return None, "missing QUESTION: line"
 
-    if not headline:
-        return None, f"missing headline (keys seen: {keys})"
-    if not isinstance(raw, list) or not raw:
-        return None, f"missing paragraphs (keys seen: {keys})"
+    headline = h_m.group(1).strip().strip("\"'“”")
+    closing = re.sub(r"\s+", " ", q_m.group(1)).strip()
+    if not headline or not closing:
+        return None, "empty headline or question"
 
-    paragraphs = []
-    for p in raw:
-        if isinstance(p, dict):  # tolerate {"text": "..."} shapes
-            p = p.get("text", "")
-        text = str(p).strip()
-        if text:
-            paragraphs.append(text)
-
-    # If the model put the closing question at the end of the paragraphs, use it.
-    if not closing and paragraphs and "?" in paragraphs[-1]:
-        closing = paragraphs.pop()
-
-    if not closing:
-        return None, f"missing closing_question (keys seen: {keys})"
-    if not 2 <= len(paragraphs) <= 6:
+    paragraphs = [
+        re.sub(r"\s+", " ", p).strip()
+        for p in re.split(r"\n\s*\n", b_m.group(1).strip())
+        if p.strip()
+    ]
+    if len(paragraphs) < 3:
+        regrouped = _regroup_sentences(" ".join(paragraphs), 3)
+        if regrouped is None:
+            return None, "body too short to form 3 paragraphs"
+        paragraphs = regrouped
+    if len(paragraphs) > 4:
         return None, f"{len(paragraphs)} paragraphs (need 3 or 4)"
 
-    raw_tags = result.get("hashtags", [])
-    if isinstance(raw_tags, str):
-        raw_tags = re.findall(r"#?\w+", raw_tags)
-    if not isinstance(raw_tags, list):
-        raw_tags = []
     hashtags = []
-    for h in raw_tags:
-        tag = re.sub(r"\W", "", str(h).lstrip("#"))
-        if tag and f"#{tag}" not in hashtags:
-            hashtags.append(f"#{tag}")
+    for tag in re.findall(r"#\w+", t_m.group(1) if t_m else ""):
+        if tag not in hashtags:
+            hashtags.append(tag)
     if len(hashtags) < 3:
         return None, f"only {len(hashtags)} hashtags (need 5-8)"
 
@@ -309,25 +359,20 @@ def write_post(article: dict, max_attempts: int = 6) -> str:
         if feedback:
             messages.append({"role": "user", "content": feedback})
 
-        try:
-            result = groq_client.chat_json(messages, temperature=0.7, max_tokens=1400, reasoning_effort="low")
-        except groq_client.GroqError as exc:
-            log.warning("Draft attempt %d failed at the API level (%s); retrying.", attempt, exc)
-            feedback = ""
-            time.sleep(PAUSE_AFTER_API_ERROR)
+        text, error, wait = _groq_text(messages)
+        if error:
+            log.warning("Draft attempt %d failed at the API level (%s); retrying.", attempt, error)
+            time.sleep(wait)
             continue
 
-        parsed, reason = _parse_draft(result)
+        last_draft_text = text[:1500]
+        parsed, reason = _parse_plain_draft(text)
         if parsed is None:
             log.warning("Draft attempt %d rejected: %s", attempt, reason)
-            try:
-                last_draft_text = json.dumps(result, ensure_ascii=False)[:1500]
-            except (TypeError, ValueError):
-                last_draft_text = str(result)[:1500]
             feedback = (
-                f"Your last reply was rejected: {reason}. Return the JSON exactly as "
-                "specified with the keys headline, paragraphs (a list of 3 or 4 plain "
-                "strings), closing_question, hashtags (5-8 items)."
+                f"Your last reply was rejected: {reason}. Use EXACTLY this layout: "
+                "a HEADLINE: line, then BODY: followed by 3 paragraphs separated by blank "
+                "lines, then a QUESTION: line, then a HASHTAGS: line with 5-8 hashtags."
             )
             time.sleep(PAUSE_AFTER_REJECTED_DRAFT)
             continue
@@ -356,8 +401,8 @@ def write_post(article: dict, max_attempts: int = 6) -> str:
             problems.append(f"it contained the banned phrase '{banned}'; rewrite without it")
         feedback = (
             "Your previous draft was rejected: " + "; ".join(problems) + ". "
-            "Rewrite the whole post following every rule. The word total counts the headline, "
-            "all paragraphs and the closing question."
+            "Rewrite the whole post following every rule and the exact layout. The word total "
+            "counts the headline, all paragraphs and the question."
         )
         time.sleep(PAUSE_AFTER_REJECTED_DRAFT)
 
