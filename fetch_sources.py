@@ -4,7 +4,8 @@ Pulls candidate stories for the daily LinkedIn post.
 Priority order:
   1. RECENT NEWS about ART / IVF / embryology / fertility (Google News RSS
      searches + a few health-news RSS feeds), limited to the last
-     NEWS_MAX_AGE_DAYS days.
+     NEWS_MAX_AGE_DAYS days, filtered for relevance and ranked so the most
+     on-topic stories come first.
   2. PubMed research abstracts, only as a FALLBACK if there is too little news.
 
 Anything whose stable ID already appears in posted_log.json is filtered out.
@@ -70,6 +71,20 @@ EXTRA_NEWS_FEEDS = [
 
 USER_AGENT = "Mozilla/5.0 (compatible; embryology-linkedin-bot)"
 
+# A story must mention at least one of these (word-start match) to be kept.
+_RELEVANT_RE = re.compile(
+    r"\b(ivf|in vitro|embryo|blastocyst|icsi|assisted reproduct|fertili|infertil|"
+    r"egg freezing|oocyte|sperm|preimplantation|pgt|iui|intrauterine insemination|"
+    r"reproductive medicine|reproductive technolog|gamete|ovarian stimulation|implantation)"
+)
+
+# Headlines containing these are dropped (livestock, finance, celebrity news).
+_EXCLUDE_RE = re.compile(
+    r"\b(cattle|charolais|heifers?|bulls?|cows?|calves|calf|livestock|bovine|equine|"
+    r"stallion|swine|dairy|sheep|ipo|nasdaq|crypto|cryptocurrency|stock market|"
+    r"share price|bollywood|actor|actress|celebrity|kardashian)\b"
+)
+
 
 def load_posted_log() -> dict:
     path = Path(config.LOG_PATH)
@@ -105,6 +120,25 @@ def _parse_feed(url: str):
 def _title_key(title: str) -> str:
     """Normalized title used to collapse the same story from several outlets."""
     return re.sub(r"[^a-z0-9]", "", title.lower())[:60]
+
+
+def _relevance_score(candidate: dict):
+    """Returns a relevance score, or None if the story should be dropped."""
+    title = candidate["title"].lower()
+    body = candidate["abstract"].lower()
+
+    if _EXCLUDE_RE.search(title):
+        return None
+
+    title_hits = len(_RELEVANT_RE.findall(title))
+    body_hits = len(_RELEVANT_RE.findall(body))
+    if title_hits < 1 and body_hits < 2:
+        return None
+
+    score = 3 * min(title_hits, 2) + min(body_hits, 3)
+    if len(candidate["abstract"]) > len(candidate["title"]) + 30:
+        score += 1  # has a real summary, not just a headline
+    return score
 
 
 # ---------------------------------------------------------------------------
@@ -180,9 +214,31 @@ def fetch_news_candidates(posted_log: dict) -> list:
         except Exception as exc:  # noqa: BLE001
             log.warning("News feed %s failed: %s", name, exc)
 
-    # Newest first
-    results.sort(key=lambda c: c["published"], reverse=True)
     return results
+
+
+def _filter_and_rank_news(news: list) -> list:
+    """Drop duplicate and off-topic stories, then rank by relevance (newest
+    first among equals) so the AI selector sees the best candidates first."""
+    seen_titles = set()
+    scored = []
+    dropped = 0
+
+    for c in news:
+        key = _title_key(c["title"])
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+
+        score = _relevance_score(c)
+        if score is None:
+            dropped += 1
+            continue
+        scored.append((score, c["published"], c))
+
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    log.info("News relevance filter: kept %d, dropped %d off-topic", len(scored), dropped)
+    return [c for _, _, c in scored]
 
 
 # ---------------------------------------------------------------------------
@@ -283,27 +339,17 @@ def fetch_pubmed_candidates(posted_log: dict) -> list:
 # ---------------------------------------------------------------------------
 
 def get_candidates() -> list:
-    """Return a deduplicated list of not-yet-posted candidates, news first."""
+    """Return a deduplicated list of not-yet-posted candidates, best news first."""
     posted_log = load_posted_log()
 
-    news = fetch_news_candidates(posted_log)
-
-    # Collapse the same story reported by several outlets
-    seen_titles = set()
-    unique_news = []
-    for c in news:
-        key = _title_key(c["title"])
-        if key in seen_titles:
-            continue
-        seen_titles.add(key)
-        unique_news.append(c)
+    news = _filter_and_rank_news(fetch_news_candidates(posted_log))
 
     research = []
-    if len(unique_news) < MIN_NEWS_CANDIDATES:
-        log.info("Only %d news items found; adding PubMed research as fallback", len(unique_news))
+    if len(news) < MIN_NEWS_CANDIDATES:
+        log.info("Only %d news items found; adding PubMed research as fallback", len(news))
         research = fetch_pubmed_candidates(posted_log)
 
-    all_candidates = unique_news + research
+    all_candidates = news + research
 
     seen_ids = set()
     unique_candidates = []
@@ -316,12 +362,12 @@ def get_candidates() -> list:
         unique_candidates.append(c)
 
     log.info("Fetched %d fresh candidates (%d news, %d research)",
-             len(unique_candidates), len(unique_news), len(research))
+             len(unique_candidates), len(news), len(research))
     return unique_candidates
 
 
 if __name__ == "__main__":
     candidates = get_candidates()
-    for c in candidates[:10]:
+    for c in candidates[:15]:
         print(f"- [{c['kind']}] [{c['source']}] {c['published']}  {c['title'][:90]}")
     print(f"\nTotal fresh candidates: {len(candidates)}")
